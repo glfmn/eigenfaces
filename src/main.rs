@@ -4,7 +4,8 @@ extern crate image;
 extern crate nalgebra as na;
 extern crate typenum as tn;
 
-use image::{DynamicImage, GenericImage, GenericImageView};
+use image::{DynamicImage, GenericImageView};
+use std::fs::File;
 use std::ops::RangeInclusive;
 
 /// Dynamically sized matrix to store images
@@ -32,25 +33,28 @@ fn read_dataset<S>(
     path: S,
     sets: RangeInclusive<usize>,
     range: RangeInclusive<usize>,
-) -> Result<DataSet, String>
+) -> Result<(DataSet, (u32, u32)), String>
 where
     S: AsRef<str> + std::fmt::Display,
 {
-    let mut images: Vec<ImageVector> = Vec::with_capacity(sets.end() - sets.start());
+    let mut images: Vec<ImageVector> = Vec::with_capacity(sets.end() - sets.start() + 1);
+
+    let mut bounds = (0, 0);
 
     // Stride the range of included sets in this dataset
     for s in sets {
         // Load the images from the set which correspond to the training set
         for i in range.clone() {
             if let Ok(img) = image::open(format!("{}/s{}/{}.pgm", path, s, i)) {
-                images.push(image_vector(img))
+                bounds = img.dimensions();
+                images.push(image_vector(img));
             } else {
                 return Err(format!("Failed to open image s{}/{}.pgm", s, i));
-            };
+            }
         }
     }
 
-    Ok(DataSet::from_columns(images.as_slice()))
+    Ok((DataSet::from_columns(images.as_slice()), bounds))
 }
 
 /// Calculate the mean image from the training set
@@ -97,8 +101,26 @@ fn sort_by_eigenvalue(values: &mut na::DVector<f64>, vectors: &mut na::DMatrix<f
     }
 }
 
+fn image_pca(basis_size: usize, data_set: &DataSet) -> DataSet {
+    let size = data_set.ncols();
+    if basis_size >= size {
+        panic!("Basis size larger than number of images in data set");
+    }
+
+    let covariance = data_set.transpose() * data_set.clone();
+    let na::SymmetricEigen {
+        mut eigenvectors,
+        mut eigenvalues,
+    } = covariance.symmetric_eigen();
+    sort_by_eigenvalue(&mut eigenvalues, &mut eigenvectors);
+
+    let eigen = data_set.clone() * eigenvectors;
+
+    eigen.remove_columns(basis_size - 1, size as usize - basis_size)
+}
+
 fn main() {
-    let matches = clap_app!(eigenfaces =>
+    let _matches = clap_app!(eigenfaces =>
         (version: crate_version!())
         (author: crate_authors!())
         (about: crate_description!())
@@ -107,15 +129,15 @@ fn main() {
     ).get_matches();
 
     // Load data-sets
-    let mut training_set = match read_dataset("orl_faces", 1..=40, 3..=6) {
+    let (mut training_set, (w, h)) = match read_dataset("orl_faces", 1..=40, 3..=6) {
         Ok(data) => data,
         Err(e) => {
             println!("{}", e);
             std::process::exit(1)
         }
     };
-    let mut testing_set = read_dataset("orl_faces", 1..=40, 1..=2).unwrap();
-    let mut gallery_set = read_dataset("orl_faces", 1..=40, 7..=10).unwrap();
+    let (mut testing_set, _) = read_dataset("orl_faces", 1..=40, 1..=2).unwrap();
+    let (mut gallery_set, _) = read_dataset("orl_faces", 1..=40, 7..=10).unwrap();
 
     let mean = mean_image(&training_set);
 
@@ -123,12 +145,21 @@ fn main() {
     mean_center(&mean, &mut testing_set);
     mean_center(&mean, &mut gallery_set);
 
-    let covariance = training_set.transpose() * training_set.clone();
-    let na::SymmetricEigen {
-        mut eigenvectors,
-        mut eigenvalues,
-    } = covariance.symmetric_eigen();
-    sort_by_eigenvalue(&mut eigenvalues, &mut eigenvectors);
-    let eigen = training_set.clone() * eigenvectors;
-    println!("Shape of eigen {:?}", eigen.shape());
+    let eigen = image_pca(50, &training_set);
+    for i in 0..10 {
+        use image::{jpeg, ColorType};
+        let mut file = File::create(format!("output/eigenfaces/{}.png", i)).unwrap();
+        let (min, max) = eigen.iter().fold((std::f64::MAX, std::f64::MIN), |b, p| {
+            (b.0.min(*p), b.1.max(*p))
+        });
+        let buffer: Vec<u8> = eigen
+            .column(i)
+            .iter()
+            .map(|p| ((*p - min) / (max - min) * 255f64) as u8)
+            .collect();
+        jpeg::JPEGEncoder::new(&mut file)
+            .encode(buffer.as_slice(), w, h, ColorType::Gray(8))
+            .expect("failed to encode image");
+        println!("Creating image output/eigenfaces/{}.png", i + 1);
+    }
 }
