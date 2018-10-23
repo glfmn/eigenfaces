@@ -2,9 +2,12 @@
 extern crate clap;
 extern crate image;
 extern crate nalgebra as na;
+extern crate rand;
 extern crate typenum as tn;
 
 use image::{DynamicImage, GenericImageView};
+use rand::distributions::{Distribution, Uniform};
+use rand::prelude::*;
 use std::fs::File;
 use std::ops::RangeInclusive;
 
@@ -103,7 +106,6 @@ fn sort_by_eigenvalue(values: &mut na::DVector<f64>, vectors: &mut na::DMatrix<f
 
 /// Get the principal components of a data_set
 fn image_eigen(data_set: &DataSet) -> (DataSet, na::DVector<f64>) {
-
     let covariance = data_set.transpose() * data_set.clone();
     let na::SymmetricEigen {
         mut eigenvectors,
@@ -144,25 +146,17 @@ where
 
 fn write_image<P>(path: P, buffer: &Vec<u8>, w: u32, h: u32) -> std::io::Result<()>
 where
-    P: AsRef<std::ffi::OsStr>,
+    P: AsRef<std::path::Path> + std::fmt::Display,
 {
     use image::{jpeg, ColorType};
-    let path = std::path::Path::new(&path);
+    println!(" create {}", path);
     let mut file = File::create(path).unwrap();
-    if path.exists() {
-        println!(" overwrite {}", path.to_string_lossy());
-    } else {
-        println!(" create {}", path.to_string_lossy());
-    }
     jpeg::JPEGEncoder::new(&mut file).encode(buffer.as_slice(), w, h, ColorType::Gray(8))?;
 
     Ok(())
 }
 
-fn pca_load<S>(
-    image: &na::Matrix<f64, na::Dynamic, na::U1, S>,
-    pca: &DataSet,
-) -> na::DVector<f64>
+fn pca_load<S>(image: &na::Matrix<f64, na::Dynamic, na::U1, S>, pca: &DataSet) -> na::DVector<f64>
 where
     S: na::storage::Storage<f64, na::Dynamic, na::U1>,
 {
@@ -176,11 +170,7 @@ where
     pca_load
 }
 
-fn pca_project(
-    pca_loading: &na::DVector<f64>,
-    pca: &DataSet,
-) -> ImageVector
-{
+fn pca_project(pca_loading: &na::DVector<f64>, pca: &DataSet) -> ImageVector {
     let mut projected = ImageVector::from_element(pca.nrows(), 0.);
     for c in 0..pca.ncols() {
         let pc = pca.column(c);
@@ -199,9 +189,7 @@ impl<'a> Mahalanobis<'a> {
     /// Create a mahalanobis distance calculator if the covariance matrix has an inverse
     pub fn new(eigenvalues: &'a na::DVector<f64>) -> Self {
         // Mahalanobis distance
-        Mahalanobis {
-            eigenvalues
-        }
+        Mahalanobis { eigenvalues }
     }
 
     /// Claculate the malahanobis distance for two vectors
@@ -212,12 +200,15 @@ impl<'a> Mahalanobis<'a> {
     ) -> f64
     where
         S: na::storage::Storage<f64, na::Dynamic, na::U1>,
-     {
+    {
         let difference = x - y;
-
-        difference.iter().enumerate().fold(0., |acc, (i, d)| {
-            acc + (1./self.eigenvalues[i]) * d * d
-        }).sqrt()
+        let d = difference
+            .iter()
+            .enumerate()
+            .fold(0., |acc, (i, d)| acc + (1. / self.eigenvalues[i]) * d * d)
+            .abs()
+            .sqrt();
+        d
     }
 
     /// Calculate Mahalanobis distance for each column vector in each matrix
@@ -297,7 +288,6 @@ fn main() {
     }
     let testing_pca_load: DataSet = DataSet::from_columns(testing_pca_load.as_slice());
 
-
     let mut gallery_pca_load: Vec<na::DVector<f64>> = vec![];
     for i in 0..gallery_set.ncols() {
         gallery_pca_load.push(pca_load(&gallery_set.column(i), &pca));
@@ -305,4 +295,39 @@ fn main() {
     let gallery_pca_load: DataSet = DataSet::from_columns(gallery_pca_load.as_slice());
 
     let dist = mahalanobis.distance_matrix(&testing_pca_load, &gallery_pca_load);
+
+    let mut matches = vec![(0, 0.); dist.nrows()];
+    for r in 0..dist.nrows() {
+        matches[r] = dist
+            .row(r)
+            .iter()
+            .enumerate()
+            .fold(
+                (0, std::f64::MAX),
+                |acc, (i, d)| {
+                    if *d < acc.1 {
+                        (i, *d)
+                    } else {
+                        acc
+                    }
+                },
+            );
+    }
+
+    let mut rng = thread_rng();
+    let uniform = Uniform::new(0, matches.len());
+    let samples = rng.sample_iter(&uniform);
+    let selection: Vec<usize> = samples.take(2).collect();
+
+    let mut name = 0;
+    for s in &selection {
+        name += 1;
+        let c = matches[*s].0;
+        let selection: Vec<u8> = calculate_image(&gallery_set.column(*s), min, max);
+        let matched: Vec<u8> = calculate_image(&gallery_set.column(c), min, max);
+        write_image(format!("{}/matched/{}_selection.png", output, name), &selection, w, h)
+            .expect("failed to write image");
+        write_image(format!("{}/matched/{}_match.png", output, name), &matched, w, h)
+            .expect("failed to write image");
+    }
 }
