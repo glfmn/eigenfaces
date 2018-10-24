@@ -230,22 +230,23 @@ impl<'a> Mahalanobis<'a> {
 }
 
 fn main() {
-    let _matches = clap_app!(eigenfaces =>
+    let matches = clap_app!(eigenfaces =>
         (version: crate_version!())
         (author: crate_authors!())
         (about: crate_description!())
-        (@arg DATA: +required "Path to the data set")
+        (@arg DATA: "Path to the data set")
         (@arg OUTPUT: -o --output +takes_value "Path to place output files")
     ).get_matches();
 
-    let output = "output";
+    let input = matches.value_of("DATA").unwrap_or("orl_faces");
+    let output = matches.value_of("OUTPUT").unwrap_or("target/eigenfaces");
 
-    let mut errors = vec![pca_main(true, format!("{}/a", output), 50, (3..=6, 1..=2, 7..=10))];
+    let mut errors = vec![pca_main(true, input, &format!("{}/a", output), 50, (3..=6, 1..=2, 7..=10))];
     for s in vec![40, 30, 20, 10, 5] {
-        errors.push(pca_main(false, format!("{}/b/{}", output, s), s, (3..=6, 1..=2, 7..=10)));
+        errors.push(pca_main(false, input, &format!("{}/b/{}", output, s), s, (3..=6, 1..=2, 7..=10)));
     }
-    pca_main(true, format!("{}/c", output), 50, (1..=4, 9..=10, 5..=8));
 
+    pca_main(true, input, &format!("{}/c", output), 50, (1..=4, 9..=10, 5..=8));
     let mut fg = Figure::new();
     fg.set_terminal("epscairo", format!("{}/error.eps", output).as_str())
         .axes2d()
@@ -259,20 +260,21 @@ fn main() {
 
     fn pca_main<P>(
         write_faces: bool,
+        input: P,
         output: P,
         pca_size: usize,
         experiment: (RangeInclusive<usize>, RangeInclusive<usize>, RangeInclusive<usize>)
     ) -> f64
-    where P: AsRef<std::path::Path> + std::fmt::Display
+    where P: AsRef<std::path::Path> + std::fmt::Display + AsRef<str> + Clone
     {
         fs::create_dir_all(format!("{}", output)).unwrap();
         fs::create_dir_all(format!("{}/eigenfaces", output)).unwrap();
         fs::create_dir_all(format!("{}/matched", output)).unwrap();
 
         // Load data-sets
-        let (mut training_set, (w, h)) = read_dataset("orl_faces", 1..=40, experiment.0).unwrap();
-        let (testing_set, _) = read_dataset("orl_faces", 1..=40, experiment.1).unwrap();
-        let (gallery_set, _) = read_dataset("orl_faces", 1..=40, experiment.2).unwrap();
+        let (mut training_set, (w, h)) = read_dataset(input.clone(), 1..=40, experiment.0).unwrap();
+        let (testing_set, _) = read_dataset(input.clone(), 1..=40, experiment.1).unwrap();
+        let (gallery_set, _) = read_dataset(input.clone(), 1..=40, experiment.2).unwrap();
 
         let mean = mean_image(&training_set);
 
@@ -344,12 +346,12 @@ fn main() {
             );
         }
 
-        let mut rng = thread_rng();
-        let uniform = Uniform::new(0, matches.len());
-        let samples = rng.sample_iter(&uniform);
-        let selection: Vec<usize> = samples.take(2).collect();
-
         if write_faces {
+            let mut rng = thread_rng();
+            let uniform = Uniform::new(0, matches.len());
+            let samples = rng.sample_iter(&uniform);
+            let selection: Vec<usize> = samples.take(2).collect();
+
             let mut name = 0;
             for s in selection {
                 name += 1;
