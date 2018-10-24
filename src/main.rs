@@ -6,9 +6,9 @@ extern crate rand;
 extern crate typenum as tn;
 
 use image::{DynamicImage, GenericImageView};
-use rand::distributions::{Distribution, Uniform};
+use rand::distributions::Uniform;
 use rand::prelude::*;
-use std::fs::File;
+use std::fs::{self, File};
 use std::ops::RangeInclusive;
 
 /// Dynamically sized matrix to store images
@@ -90,7 +90,7 @@ fn sort_by_eigenvalue(values: &mut na::DVector<f64>, vectors: &mut na::DMatrix<f
     fn greater(a: f64, b: f64) -> bool {
         match (a, b) {
             (x, y) if x.is_nan() || y.is_nan() => panic!("NaN found in sort"),
-            (_, _) => a > b,
+            (_, _) => a < b,
         }
     }
 
@@ -127,16 +127,15 @@ fn image_pca(basis_size: usize, basis: DataSet) -> DataSet {
     basis.remove_columns(basis_size - 1, size as usize - basis_size)
 }
 
-fn calculate_image<R, C, SR, SC>(
-    image: &na::MatrixSlice<f64, R, C, SR, SC>,
+fn calculate_image<R, C, S>(
+    image: &na::Matrix<f64, R, C, S>,
     min: f64,
     max: f64,
 ) -> Vec<u8>
 where
-    SR: na::Dim,
-    SC: na::Dim,
-    C: na::Dim,
     R: na::Dim,
+    C: na::Dim,
+    S: na::storage::Storage<f64, R, C>,
 {
     image
         .iter()
@@ -170,7 +169,14 @@ where
     pca_load
 }
 
-fn pca_project(pca_loading: &na::DVector<f64>, pca: &DataSet) -> ImageVector {
+fn pca_project<S>(
+    pca_loading: &na::Matrix<f64, na::Dynamic, na::U1, S>,
+    pca: &DataSet
+) -> ImageVector
+where
+    S: na::storage::Storage<f64, na::Dynamic, na::U1>,
+{
+
     let mut projected = ImageVector::from_element(pca.nrows(), 0.);
     for c in 0..pca.ncols() {
         let pc = pca.column(c);
@@ -185,8 +191,6 @@ struct Mahalanobis<'a> {
 }
 
 impl<'a> Mahalanobis<'a> {
-    // Try to calculate the inverse of the covariance matrix and store it as the basis for
-    /// Create a mahalanobis distance calculator if the covariance matrix has an inverse
     pub fn new(eigenvalues: &'a na::DVector<f64>) -> Self {
         // Mahalanobis distance
         Mahalanobis { eigenvalues }
@@ -201,14 +205,12 @@ impl<'a> Mahalanobis<'a> {
     where
         S: na::storage::Storage<f64, na::Dynamic, na::U1>,
     {
-        let difference = x - y;
-        let d = difference
+        (x - y)
             .iter()
             .enumerate()
             .fold(0., |acc, (i, d)| acc + (1. / self.eigenvalues[i]) * d * d)
             .abs()
-            .sqrt();
-        d
+            .sqrt()
     }
 
     /// Calculate Mahalanobis distance for each column vector in each matrix
@@ -236,69 +238,81 @@ fn main() {
 
     let output = "output";
 
-    // Load data-sets
-    let (mut training_set, (w, h)) = match read_dataset("orl_faces", 1..=40, 3..=6) {
-        Ok(data) => data,
-        Err(e) => {
-            println!("{}", e);
-            std::process::exit(1)
-        }
-    };
-    let (testing_set, _) = read_dataset("orl_faces", 1..=40, 1..=2).unwrap();
-    let (gallery_set, _) = read_dataset("orl_faces", 1..=40, 7..=10).unwrap();
+    pca_main(format!("{}/a", output), 50, (3..=6, 1..=2, 7..=10));
+    for s in vec![40, 30, 20, 10, 5] {
+        pca_main(format!("{}/b/{}", output, s), s, (3..=6, 1..=2, 7..=10));
+    }
+    pca_main(format!("{}/c", output), 50, (1..=4, 9..=10, 5..=8));
 
-    let mean = mean_image(&training_set);
-
+    fn pca_main<P>(
+        output: P,
+        pca_size: usize,
+        experiment: (RangeInclusive<usize>, RangeInclusive<usize>, RangeInclusive<usize>)
+    ) -> f64
+    where P: AsRef<std::path::Path> + std::fmt::Display
     {
-        let buffer: Vec<u8> = mean.iter().map(|p| *p as u8).collect();
-        write_image(format!("{}/mean_image.png", output), &buffer, w, h)
-            .expect("failed to encode image");
-    }
+        fs::create_dir_all(format!("{}", output)).unwrap();
+        fs::create_dir_all(format!("{}/eigenfaces", output)).unwrap();
+        fs::create_dir_all(format!("{}/matched", output)).unwrap();
 
-    mean_center(&mean, &mut training_set);
+        // Load data-sets
+        let (mut training_set, (w, h)) = read_dataset("orl_faces", 1..=40, experiment.0).unwrap();
+        let (testing_set, _) = read_dataset("orl_faces", 1..=40, experiment.1).unwrap();
+        let (gallery_set, _) = read_dataset("orl_faces", 1..=40, experiment.2).unwrap();
 
-    let (eigen, eigenvalues) = image_eigen(&training_set);
-    let pca = image_pca(50, eigen.clone());
+        let mean = mean_image(&training_set);
 
-    let (min, max) = pca.iter().fold((std::f64::MAX, std::f64::MIN), |b, p| {
-        (b.0.min(*p), b.1.max(*p))
-    });
+        {
+            let buffer: Vec<u8> = mean.iter().map(|p| *p as u8).collect();
+            write_image(format!("{}/mean_image.png", output), &buffer, w, h)
+                .expect("failed to encode image");
+        }
 
-    // Create and write images for eigenfaces
+        mean_center(&mean, &mut training_set);
 
-    // 10 most significant eigenfaces
-    for i in 0..10 {
-        let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
-        write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
-            .expect("failed to encode image");
-    }
+        let (eigen, eigenvalues) = image_eigen(&training_set);
 
-    // 10 least significant eigenfaces
-    for i in 39..50 {
-        let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
-        write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
-            .expect("failed to encode image");
-    }
+        let pca = image_pca(pca_size, eigen.clone());
 
-    let mahalanobis = Mahalanobis::new(&eigenvalues);
+        let (min, max) = pca.iter().fold((std::f64::MAX, std::f64::MIN), |b, p| {
+            (b.0.min(*p), b.1.max(*p))
+        });
 
-    let mut testing_pca_load: Vec<na::DVector<f64>> = vec![];
-    for i in 0..testing_set.ncols() {
-        testing_pca_load.push(pca_load(&testing_set.column(i), &pca));
-    }
-    let testing_pca_load: DataSet = DataSet::from_columns(testing_pca_load.as_slice());
+        // Create and write images for eigenfaces
 
-    let mut gallery_pca_load: Vec<na::DVector<f64>> = vec![];
-    for i in 0..gallery_set.ncols() {
-        gallery_pca_load.push(pca_load(&gallery_set.column(i), &pca));
-    }
-    let gallery_pca_load: DataSet = DataSet::from_columns(gallery_pca_load.as_slice());
+        // 10 most significant eigenfaces
+        for i in 0..10.min(pca.ncols()) {
+            let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
+            write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
+                .expect("failed to encode image");
+        }
 
-    let dist = mahalanobis.distance_matrix(&testing_pca_load, &gallery_pca_load);
+        // 10 least significant eigenfaces
+        for i in (pca.ncols() - 10).max(0)..pca.ncols() {
+            let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
+            write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
+                .expect("failed to encode image");
+        }
 
-    let mut matches = vec![(0, 0.); dist.nrows()];
-    for r in 0..dist.nrows() {
-        matches[r] = dist
+        let mahalanobis = Mahalanobis::new(&eigenvalues);
+
+        let mut testing_pca_load: Vec<na::DVector<f64>> = vec![];
+        for i in 0..testing_set.ncols() {
+            testing_pca_load.push(pca_load(&testing_set.column(i), &pca));
+        }
+        let testing_pca_load: DataSet = DataSet::from_columns(testing_pca_load.as_slice());
+
+        let mut gallery_pca_load: Vec<na::DVector<f64>> = vec![];
+        for i in 0..gallery_set.ncols() {
+            gallery_pca_load.push(pca_load(&gallery_set.column(i), &pca));
+        }
+        let gallery_pca_load: DataSet = DataSet::from_columns(gallery_pca_load.as_slice());
+
+        let dist = mahalanobis.distance_matrix(&testing_pca_load, &gallery_pca_load);
+
+        let mut matches = vec![(0, 0.); dist.nrows()];
+        for r in 0..dist.nrows() {
+            matches[r] = dist
             .row(r)
             .iter()
             .enumerate()
@@ -312,22 +326,36 @@ fn main() {
                     }
                 },
             );
-    }
+        }
 
-    let mut rng = thread_rng();
-    let uniform = Uniform::new(0, matches.len());
-    let samples = rng.sample_iter(&uniform);
-    let selection: Vec<usize> = samples.take(2).collect();
+        let mut rng = thread_rng();
+        let uniform = Uniform::new(0, matches.len());
+        let samples = rng.sample_iter(&uniform);
+        let selection: Vec<usize> = samples.take(2).collect();
 
-    let mut name = 0;
-    for s in &selection {
-        name += 1;
-        let c = matches[*s].0;
-        let selection: Vec<u8> = calculate_image(&gallery_set.column(*s), min, max);
-        let matched: Vec<u8> = calculate_image(&gallery_set.column(c), min, max);
-        write_image(format!("{}/matched/{}_selection.png", output, name), &selection, w, h)
-            .expect("failed to write image");
-        write_image(format!("{}/matched/{}_match.png", output, name), &matched, w, h)
-            .expect("failed to write image");
+        let mut name = 0;
+        for s in selection {
+            name += 1;
+            let m = matches[s].0;
+            let selection: Vec<u8> = testing_set.column(s).iter().map(|p| *p as u8).collect();
+            let select_proj: Vec<u8> = calculate_image(
+                &pca_project(&testing_pca_load.column(s), &pca), min, max
+            ).iter().map(|p| *p as u8).collect();
+            let matched: Vec<u8> = gallery_set.column(m).iter().map(|p| *p as u8).collect();
+            write_image(format!("{}/matched/proj_{}.png", output, name), &select_proj, w, h,)
+                .expect("failed to write image");
+            write_image(format!("{}/matched/{}_selection.png", output, name), &selection, w, h,)
+                .expect("failed to write image");
+            write_image(format!("{}/matched/{}_match.png", output, name), &matched, w, h)
+                .expect("failed to write image");
+        }
+
+        let mut match_count = 0;
+        for (s, (m, _)) in matches.iter().enumerate() {
+            if s/2 == *m/4 {
+                match_count += 1;
+            }
+        }
+        match_count as f64 / matches.len() as f64
     }
 }
