@@ -1,10 +1,12 @@
 #[macro_use]
 extern crate clap;
+extern crate gnuplot;
 extern crate image;
 extern crate nalgebra as na;
 extern crate rand;
 extern crate typenum as tn;
 
+use gnuplot::{Figure, Caption, Color, AxesCommon};
 use image::{DynamicImage, GenericImageView};
 use rand::distributions::Uniform;
 use rand::prelude::*;
@@ -238,13 +240,25 @@ fn main() {
 
     let output = "output";
 
-    pca_main(format!("{}/a", output), 50, (3..=6, 1..=2, 7..=10));
+    let mut errors = vec![pca_main(true, format!("{}/a", output), 50, (3..=6, 1..=2, 7..=10))];
     for s in vec![40, 30, 20, 10, 5] {
-        pca_main(format!("{}/b/{}", output, s), s, (3..=6, 1..=2, 7..=10));
+        errors.push(pca_main(false, format!("{}/b/{}", output, s), s, (3..=6, 1..=2, 7..=10)));
     }
-    pca_main(format!("{}/c", output), 50, (1..=4, 9..=10, 5..=8));
+    pca_main(true, format!("{}/c", output), 50, (1..=4, 9..=10, 5..=8));
+
+    let mut fg = Figure::new();
+    fg.set_terminal("epscairo", format!("{}/error.eps", output).as_str())
+        .axes2d()
+        .set_title("Error vs PCA Size", &[])
+        .lines(
+            &[50f64, 40., 30., 20., 10., 5.],
+            errors.as_slice(),
+            &[Caption("Error"), Color("red")]
+        );
+    fg.show();
 
     fn pca_main<P>(
+        write_faces: bool,
         output: P,
         pca_size: usize,
         experiment: (RangeInclusive<usize>, RangeInclusive<usize>, RangeInclusive<usize>)
@@ -262,7 +276,7 @@ fn main() {
 
         let mean = mean_image(&training_set);
 
-        {
+        if write_faces {
             let buffer: Vec<u8> = mean.iter().map(|p| *p as u8).collect();
             write_image(format!("{}/mean_image.png", output), &buffer, w, h)
                 .expect("failed to encode image");
@@ -280,18 +294,20 @@ fn main() {
 
         // Create and write images for eigenfaces
 
-        // 10 most significant eigenfaces
-        for i in 0..10.min(pca.ncols()) {
-            let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
-            write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
+        if write_faces {
+            // 10 most significant eigenfaces
+            for i in 0..10.min(pca.ncols()) {
+                let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
+                write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
                 .expect("failed to encode image");
-        }
+            }
 
-        // 10 least significant eigenfaces
-        for i in (pca.ncols() - 10).max(0)..pca.ncols() {
-            let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
-            write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
+            // 10 least significant eigenfaces
+            for i in (pca.ncols() - 10).max(0)..pca.ncols() {
+                let buffer: Vec<u8> = calculate_image(&pca.column(i), min, max);
+                write_image(format!("{}/eigenfaces/{}.png", output, i + 1), &buffer, w, h)
                 .expect("failed to encode image");
+            }
         }
 
         let mahalanobis = Mahalanobis::new(&eigenvalues);
@@ -333,21 +349,23 @@ fn main() {
         let samples = rng.sample_iter(&uniform);
         let selection: Vec<usize> = samples.take(2).collect();
 
-        let mut name = 0;
-        for s in selection {
-            name += 1;
-            let m = matches[s].0;
-            let selection: Vec<u8> = testing_set.column(s).iter().map(|p| *p as u8).collect();
-            let select_proj: Vec<u8> = calculate_image(
-                &pca_project(&testing_pca_load.column(s), &pca), min, max
-            ).iter().map(|p| *p as u8).collect();
-            let matched: Vec<u8> = gallery_set.column(m).iter().map(|p| *p as u8).collect();
-            write_image(format!("{}/matched/proj_{}.png", output, name), &select_proj, w, h,)
-                .expect("failed to write image");
-            write_image(format!("{}/matched/{}_selection.png", output, name), &selection, w, h,)
-                .expect("failed to write image");
-            write_image(format!("{}/matched/{}_match.png", output, name), &matched, w, h)
-                .expect("failed to write image");
+        if write_faces {
+            let mut name = 0;
+            for s in selection {
+                name += 1;
+                let m = matches[s].0;
+                let selection: Vec<u8> = testing_set.column(s).iter().map(|p| *p as u8).collect();
+                let matched: Vec<u8> = gallery_set.column(m).iter().map(|p| *p as u8).collect();
+                let select_proj: Vec<u8> = calculate_image(
+                    &pca_project(&testing_pca_load.column(s), &pca), min, max
+                ).iter().map(|p| *p as u8).collect();
+                write_image(format!("{}/matched/proj_{}.png", output, name), &select_proj, w, h,)
+                    .expect("failed to write image");
+                write_image(format!("{}/matched/{}_selection.png", output, name), &selection, w, h)
+                    .expect("failed to write image");
+                write_image(format!("{}/matched/{}_match.png", output, name), &matched, w, h)
+                    .expect("failed to write image");
+            }
         }
 
         let mut match_count = 0;
