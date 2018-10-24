@@ -4,8 +4,9 @@ version = "0.1.0"
 authors = ["Gwen Lofman <Gwen@Lofman.io>"]
 
 [dependencies]
+clap = "^2.32.0"
+gnuplot = "0.0.26"
 image = "0.20.0"
 nalgebra = "^0.16.4"
-clap = "^2.32.0"
-typenum = "^1.5.1"
 rand = "^0.5"
+typenum = "^1.5.1"
